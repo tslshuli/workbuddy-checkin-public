@@ -6,16 +6,17 @@
 在推送到 GitHub 之前运行，确保不会有任何凭据随代码泄露。
 
 用法：
-  python security_audit.py              # 审计当前目录（脚本所在目录的父级 = 项目根）
+  python security_audit.py              # 审计当前目录（脚本所在目录 = 项目根）
   python security_audit.py --path .     # 指定项目根目录
 
 检查项：
   1. 硬编码凭据（JWT / 企微 webhook / Bark key / 私钥 / 云厂商密钥 / GitHub PAT）
   2. 本机真实 token 是否出现在任何交付文件中（最强校验）
-  3. 危险代码模式（shell=True / eval / os.system / rm -rf / verify=False / curl|sh）
-  4. 敏感文件是否误入项目（notify_config.json 等）
-  5. .gitignore 是否覆盖关键项
-  6. workflow 安全实践（最小权限 / 无 pull_request_target / 退出码传播等）
+  3. 登录态加密信封（$wbEncrypted）是否被误提交 —— 客户端 5.6.2+ 新增
+  4. 危险代码模式（shell=True / eval / os.system / rm -rf / verify=False / curl|sh）
+  5. 敏感文件是否误入项目（notify_config.json / workbuddy-desktop.info 等）
+  6. .gitignore 是否覆盖关键项
+  7. workflow 安全实践（最小权限 / 无 pull_request_target / 退出码传播等）
 
 退出码：0 = 无风险；1 = 发现风险（可用于 CI 卡点）
 """
@@ -46,7 +47,14 @@ DANGER_PATTERNS = {
     "curl 管道执行": re.compile(r"curl\s+[^|]*\|\s*(ba)?sh"),
 }
 
-SECRET_FILENAMES = {"notify_config.json"}
+# 登录态密文特征：一旦出现在仓库文件里，说明把本机登录态内容粘进来了。
+# 即便它不是「可用的」明文凭据，也绝不该出现在交付物中（且容易诱导用户误用）。
+# ⚠️ 只匹配「带真实 base64 载荷」的完整信封 —— 文档里描述格式用的
+#    {"$wbEncrypted":1,"envelope":"<base64>"} 这类示意写法不会被误报。
+ENVELOPE_RX = re.compile(
+    r'\$wbEncrypted["\']?\s*:\s*1\s*,\s*["\']?envelope["\']?\s*:\s*["\'][A-Za-z0-9+/=]{40,}')
+
+SECRET_FILENAMES = {"notify_config.json", "workbuddy-desktop.info", "checkin-rt.json"}
 SKIP_DIRS = {"__pycache__", ".git", ".venv", "venv", "node_modules"}
 # 自检脚本自身的检测规则字面量、以及审计报告中对危险模式的文字引用，
 # 都会命中模式匹配（误报），故一并跳过
@@ -54,7 +62,12 @@ SKIP_FILES = {"security_audit.py", "SECURITY-AUDIT.md"}
 
 
 def find_local_token():
-    """尝试读取本机 WorkBuddy 登录态 token，用于最强校验。读取失败返回 None。"""
+    """尝试读取本机 WorkBuddy 登录态 token，用于最强校验。读取失败返回 None。
+
+    注意：客户端 5.6.2+ 起 auth.accessToken 是 AES-256-GCM 信封（dict），
+    不是可参与字符串比对的明文 —— 此时返回 None（跳过比对），
+    否则 `real_token in txt` 会因类型不符而抛异常。
+    """
     home = os.path.expanduser("~")
     cands = []
     if sys.platform.startswith("win"):
@@ -74,7 +87,9 @@ def find_local_token():
         try:
             if os.path.isfile(p):
                 with open(p, encoding="utf-8") as f:
-                    return json.load(f).get("auth", {}).get("accessToken")
+                    tok = json.load(f).get("auth", {}).get("accessToken")
+                if isinstance(tok, str) and tok.strip():
+                    return tok
         except Exception:
             continue
     return None
@@ -130,6 +145,10 @@ def main():
                 elif real_token[-30:] in txt:
                     leaks.append((rel, "! 真实 token 尾部片段 !", "<REDACTED>"))
 
+            if ENVELOPE_RX.search(txt):
+                leaks.append((rel, "!! 登录态加密信封（$wbEncrypted）!!",
+                              "不可用于云端，请删除"))
+
             for name, rx in SECRET_PATTERNS.items():
                 if rx.search(txt):
                     leaks.append((rel, name, "<见文件>"))
@@ -150,7 +169,7 @@ def main():
         for r, n, s in leaks:
             print("    [严重] %-38s %-26s %s" % (r, n, s))
     else:
-        print("    [通过] 未发现任何真实凭据 / 密钥 / token 明文")
+        print("    [通过] 未发现任何真实凭据 / 密钥 / token 明文 / 登录态信封")
     print()
 
     print("[3] 危险代码模式")
@@ -166,7 +185,7 @@ def main():
         for f in secret_files:
             print("    [严重] 发现含密钥的文件：%s" % f)
     else:
-        print("    [通过] 未发现 notify_config.json 等敏感文件")
+        print("    [通过] 未发现 notify_config.json / workbuddy-desktop.info 等敏感文件")
     print()
 
     gi = os.path.join(base, ".gitignore")
@@ -174,7 +193,8 @@ def main():
     if os.path.isfile(gi):
         with open(gi, encoding="utf-8") as fh:
             g = fh.read()
-        for m in ("notify_config.json", "checkin.log", "__pycache__", "result.json"):
+        for m in ("notify_config.json", "checkin.log", "__pycache__", "result.json",
+                  "workbuddy-desktop.info"):
             print("    %s %s" % ("[通过]" if m in g else "[缺失]", m))
     else:
         print("    [严重] 缺少 .gitignore")
@@ -187,7 +207,9 @@ def main():
             w = fh.read()
         print("[6] workflow 安全实践")
         for label, cond in [
-            ("使用 Secrets 注入凭据", "secrets.WORKBUDDY_ACCESS_TOKEN" in w),
+            ("使用 Secrets 注入凭据",
+             any(x in w for x in ("secrets.WB_REFRESH_TOKEN", "secrets.WB_ACCESS_TOKEN",
+                                  "secrets.WORKBUDDY_ACCESS_TOKEN"))),
             ("无 pull_request_target（防投毒）", "pull_request_target" not in w),
             ("声明最小权限 permissions", "permissions:" in w),
             ("固定 concurrency 防重复", "concurrency:" in w),
@@ -195,7 +217,8 @@ def main():
             ("用 PIPESTATUS 传播退出码", "PIPESTATUS" in w),
             ("摘要经白名单过滤", "summarize_result.py" in w),
             ("未直接 cat 原始结果进摘要", "cat result.json" not in w),
-            ("未打印 token 长度", "${#WORKBUDDY_ACCESS_TOKEN}" not in w),
+            ("未打印 token 长度", all(x not in w for x in (
+                "${#WORKBUDDY_ACCESS_TOKEN}", "${#WB_REFRESH_TOKEN}", "${#WB_ACCESS_TOKEN}"))),
             ("未出现 curl|sh 远程执行", "curl" not in w),
         ]:
             print("    %s %s" % ("[通过]" if cond else "[注意]", label))
@@ -206,9 +229,9 @@ def main():
     print("结论：泄露风险 %s ｜ 危险代码 %s ｜ 敏感文件 %s" % (
         "有" if leaks else "无", "有" if dangers else "无", "有" if secret_files else "无"))
     if risk:
-        print("⚠️ 请修复上述 [严重] 项后再部署！")
+        print("⚠️ 请修复上述 [严重] 项后再推送到公开仓库！")
     else:
-        print("✓ 未发现泄密风险，可安全部署（仍需确认仓库已设为 private）。")
+        print("✓ 未发现泄密风险，可安全推送（仍需自行确认仓库可见性与平台规则风险）。")
     print("=" * 70)
     sys.exit(1 if risk else 0)
 

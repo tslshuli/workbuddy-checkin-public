@@ -28,7 +28,7 @@ import sys
 
 # 白名单：仅这些键允许出现在摘要中（detail 下的用 "detail.xxx" 表示）
 ALLOWED_TOP = ("status", "action", "points", "balance", "msg")
-ALLOWED_DETAIL = ("streak_days", "today_signed", "domain",
+ALLOWED_DETAIL = ("streak_days", "today_signed", "domain", "credential",
                   "notify_config_present", "notify_enabled",
                   "notify_success_notify_flag", "notify_success", "notify")
 

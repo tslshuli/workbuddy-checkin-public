@@ -2,8 +2,12 @@ name: WorkBuddy 每日自动签到
 
 # ─────────────────────────────────────────────────────────────
 #  WorkBuddy「Buddy 加油站」每日签到 · GitHub Actions 版
-#  原理：从仓库 Secrets 读取 accessToken，直接调用官方签到接口
+#  原理：从仓库 Secrets 读取凭据，直接调用官方签到接口
 #       （接口直签，无需 GUI，无需本机常驻）
+#  凭据（长效令牌优先，适配客户端 5.6.2+）：
+#    WB_REFRESH_TOKEN — 长效令牌，每次运行先向插件网关换取接口令牌（推荐）
+#    WB_ACCESS_TOKEN  — 短效接口令牌直通（兼容 5.5.x 及更早 / 未加密登录态）
+#  两者都配时脚本会优先使用 WB_REFRESH_TOKEN。
 # ─────────────────────────────────────────────────────────────
 
 on:
@@ -35,9 +39,10 @@ jobs:
     timeout-minutes: 10
 
     env:
-      # 从 Secrets 注入凭据（脚本会自动识别 WORKBUDDY_ACCESS_TOKEN）
-      WORKBUDDY_ACCESS_TOKEN: ${{ secrets.WORKBUDDY_ACCESS_TOKEN }}
-      WORKBUDDY_DOMAIN: ${{ secrets.WORKBUDDY_DOMAIN }}
+      # 凭据（脚本自动识别，长效令牌优先）
+      WB_REFRESH_TOKEN: ${{ secrets.WB_REFRESH_TOKEN }}
+      WB_ACCESS_TOKEN: ${{ secrets.WB_ACCESS_TOKEN }}
+      WB_DOMAIN: ${{ secrets.WB_DOMAIN }}
       # 通知通道（可选，任一为空则跳过该通道）
       WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
       PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
@@ -53,13 +58,16 @@ jobs:
       - name: 检查凭据是否已配置
         id: guard
         run: |
-          if [ -z "$WORKBUDDY_ACCESS_TOKEN" ]; then
-            echo "::error::未配置 Secret「WORKBUDDY_ACCESS_TOKEN」。请在仓库 Settings → Secrets and variables → Actions 中添加。"
+          if [ -n "$WB_REFRESH_TOKEN" ]; then
+            echo "✓ 凭据已配置：WB_REFRESH_TOKEN（长效令牌，推荐；内容不外显）"
+          elif [ -n "$WB_ACCESS_TOKEN" ]; then
+            echo "✓ 凭据已配置：WB_ACCESS_TOKEN（短效令牌直通；内容不外显）"
+          else
+            echo "::error::未配置凭据。请在仓库 Settings → Secrets and variables → Actions 添加「WB_REFRESH_TOKEN」（客户端 5.6.2+ 必用，长效令牌）。"
             exit 1
           fi
           # 只输出存在性结论，不输出 token 长度 / 内容 / 片段（长度也是可用于指纹识别的信息）
-          echo "✓ 凭据已配置（token 存在，内容不外显）"
-          echo "✓ 接口域名：${WORKBUDDY_DOMAIN:-（默认 www.codebuddy.cn）}"
+          echo "✓ 接口域名：${WB_DOMAIN:-（默认 www.codebuddy.cn）}"
 
       - name: 设置 Python
         uses: actions/setup-python@v5
