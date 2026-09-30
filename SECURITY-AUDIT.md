@@ -182,3 +182,41 @@ python security_audit.py
 
 - **仓库可见性**：public 时 Actions 日志公开；且需自行评估平台对自动化脚本的规则风险。
 - **Git 历史**：改工作区文件**不影响**已推送的历史；如旧版曾含本机路径等内容，需 `git filter-repo` 或删库重建。
+
+---
+
+## 九、复审记录（2026-09-30）：补上「输出层」脱敏缺口
+
+**发现方式**：外部代码审阅指出 —— 本报告「问题 2」的修复**只覆盖了摘要层**，
+而 `stdout`（经 workflow 的 `tee result.json` 写入 **Actions 运行日志**）仍含完整原始响应。
+
+**核实结论：该指正成立。** 逐行核对如下：
+
+| 位置 | 事实 |
+|---|---|
+| `scripts/workbuddy_checkin.py` `run()` | `result["detail"]["status_resp"] = st_body`、`["checkin_resp"] = ck_body` |
+| 同文件 `api_call()` | `return resp.status, json.loads(body)` —— **未做任何字段裁剪** |
+| 同文件 `main()` | `print(json.dumps(res, ensure_ascii=False, indent=2))` —— **全量输出到 stdout** |
+| `.github/workflows/checkin.yml` | `python scripts/workbuddy_checkin.py $ARGS \| tee result.json` —— stdout **整份进运行日志** |
+| 本报告「问题 2」 | 位置明确写的是「**输出运行摘要**」步骤（原代码 `cat result.json` 写 `$GITHUB_STEP_SUMMARY`）→ **确未覆盖 stdout / 运行日志** |
+
+**影响范围**：仅此一处。另外三个传播面经核对均为安全 ——
+`notify_failure` / `notify_success` 只发 `msg` 与凭据来源；`write_log()` 只写 `status/action/msg`；
+`--diagnose` 只输出版本 / 凭据模式 / 网络 / 通知配置。
+
+**风险定级修正**：本报告原文把「完整响应进摘要」定为「较高」，
+但当时的实际敞口在 **`stdout` 这一路**（且本仓库 Actions 从未运行过、现已被仓库级禁用）。
+→ 性质为**代码缺陷 + 文档与实现不一致**，属**潜在**风险，非已发生泄露。
+
+**本轮修复**（`workbuddy_checkin.py` v2.1.0-ci → **v2.2.0-ci**）
+
+| # | 变更 | 安全含义 |
+|---|---|---|
+| 1 | 新增 `_slim_resp()`：接口响应**白名单压缩**后才写入 `detail` | 完整响应**永不进入** stdout / `result.json` / artifact / 摘要，四处口径统一 |
+| 2 | 保留**结论字段**（`code`/`msg`/`credit`/`total_credits`/`today_checked_in` 等）与**字段名清单**（`_keys`） | 排错能力几乎不损失 —— 仍能看到响应结构与结论值，只是看不到其余内容 |
+| 3 | 非 dict 响应（如 `{"raw": "<html>…"}`）只输出 `{"_type": …}` | 防止非 JSON 响应把整段文本带出 |
+| 4 | 新增 `WB_DUMP_RESP=1` 调试开关 | 本机排障时可临时取回完整响应；**CI 中永不设置** |
+
+**验证**：离线验收测试由 52 项扩至 **62 项**，新增 L 组 10 项 —— 其中
+**L1~L4 构造「服务端在响应里回带手机号 / 邮箱 / userId / 身份证号」的最坏情况，
+断言这些值均不出现在结果中**；L7 断言余额提取未受影响；L10 断言调试开关有效。**62/62 通过。**

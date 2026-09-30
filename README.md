@@ -69,7 +69,8 @@ python scripts/workbuddy_checkin.py --diagnose
 - **零硬编码凭据**：凭据全部走 GitHub Secrets / 环境变量，代码仓库里找不到任何密钥。
 - **适配 5.6.2+ 加密登录态**：走长效令牌通道，不依赖客户端常驻、也不需要本机解密能力。
 - **多渠道推送**：支持企业微信、PushPlus、Server酱（方糖）、Bark，成功 / 失败均可播报。
-- **日志脱敏**：运行日志与 Action 摘要经白名单过滤，token / 原始响应不外泄；凭据**只报长度、连字符片段都不输出**。
+- **日志脱敏**：**输出层 + 摘要层双重白名单过滤** —— 接口响应在写进结果前即被压缩为结论字段，
+  **完整响应永不进入 stdout / `result.json` / Actions 运行日志**；凭据**只报长度、连字符片段都不输出**。
 - **零依赖**：仅用 Python 标准库，无需安装第三方包。
 - **内置安全自检**：`security_audit.py` 在推送前扫描凭据泄露 / 危险代码 / 敏感文件。
 
@@ -259,6 +260,7 @@ Actions 运行日志与摘要会长期留存，因此做了多层防护：
 
 | 层级 | 措施 |
 |---|---|
+| **输出层** | `_slim_resp()` 把接口响应**白名单压缩**后才写入 `detail`：只保留结论字段（`code` / `msg` / `credit` / `total_credits` / `today_checked_in` 等）与**字段名清单**，其余内容一律丢弃。**完整响应永不进入 stdout / `result.json` / artifact / 摘要**（本机调试可临时 `set WB_DUMP_RESP=1` 放开，CI 中永不设置） |
 | 脚本层 | 输出 `detail.token_masked` 只含「已配置，长度 N」；`auth_file` 只含路径 / 变量名不含凭据 |
 | 摘要层 | `summarize_result.py` **白名单过滤**，只输出结论字段，不输出原始接口响应 |
 | 兜底层 | 任何长度 ≥80 的 base64url 风格长串替换为 `<REDACTED>`，防接口变更引入非预期字段 |
@@ -321,6 +323,7 @@ A：检查是否配置了任一通知通道 Secret；否则失败只体现为 Ac
 
 | 版本 | 变更 |
 |---|---|
+| **`workbuddy_checkin.py` v2.2.0-ci** | 修复**输出层脱敏缺口**：接口响应改为**白名单压缩**后才写入 `detail`，避免完整响应经 `tee` 进入公开的 Actions **运行日志**（此前只有摘要层做了过滤）。新增 `WB_DUMP_RESP=1` 本机调试开关；口径与摘要层统一。 |
 | **`workbuddy_checkin.py` v2.1.0-ci** | ① 新增**长效令牌通道**（`WB_REFRESH_TOKEN`）：先向插件网关换取接口令牌再签到，适配套客户端 5.6.2+ 的加密登录态，且不依赖客户端常驻；② 识别登录态**加密信封**并给出明确报错与指引，不再静默鉴权失败；③ 余额字段补齐新版复数 `total_credits`（旧版只认单数，导致余额恒为空）；④ `mask_token()` 收紧为**只报长度**，适配公开仓库的日志可见性；⑤ `--diagnose` 改为报告凭据通道与刷新结果。<br>配套：`sync_token_to_github.py` / `copy_token_to_clipboard.py` 改为优先导出**长效令牌**；`security_audit.py` 新增登录态信封检测；workflow 更新 Secret 注入与 guard 步骤。 |
 | v2.0.0 | 首个 GitHub Actions 版本：接口直签、多渠道推送、日志脱敏、部署前自检。 |
 

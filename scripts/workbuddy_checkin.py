@@ -112,7 +112,7 @@ STATUS_PATH = "/billing/meter/checkin-activity-status"
 CHECKIN_PATH = "/billing/meter/daily-checkin"
 HTTP_TIMEOUT = 10
 MAX_RETRY = 1
-VERSION = "2.1.0-ci"
+VERSION = "2.2.0-ci"
 
 # 长效令牌刷新端点（插件网关；与桌面客户端刷新所用同一官方接口）
 PLUGIN_API = "https://copilot.tencent.com"
@@ -361,6 +361,54 @@ def api_call(base, path, token, payload=None, method="POST"):
                 return e.code, {"raw": body}
         except Exception:
             return e.code, {"raw": ""}
+
+
+# ── 接口响应的「白名单压缩」──────────────────────────────────────
+# 为什么必须做：完整响应会被 result["detail"] 带进 stdout，而 workflow 用
+# `python scripts/workbuddy_checkin.py | tee result.json` 把 stdout 整份写进
+# **Actions 运行日志**（公开仓库里人人可读、长期留存）。一旦接口在 data 里
+# 回带用户资料（手机号 / 邮箱 / userId 等），就会直接展示在公开日志中 ——
+# 这是「依赖上游不返回敏感字段」的不可控敞口。
+#
+# 本函数把响应压成白名单：stdout / result.json / artifact / Step Summary
+# 四处输出口径一次性统一，与摘要层（summarize_result.py）保持一致。
+#
+# 本机调试需要完整响应时：set WB_DUMP_RESP=1（CI 中永不设置）。
+_RESP_KEEP = ("code", "msg", "message", "today_checked_in", "signed",
+              "success", "credit", "daily_credit", "today_credit",
+              "streak", "streak_days", "balance", "total_credits")
+
+
+def _slim_resp(body):
+    """把接口响应压成白名单字段。
+
+    保留：结论字段的值 + 完整字段名清单（排错时能看到响应结构）。
+    丢弃：其余一切内容（可能含用户资料或未来新增的未知字段）。
+    """
+    if not isinstance(body, dict):
+        # 非 dict（如 {"raw": "<html>..."} 里的字符串）只报类型，绝不带内容
+        return {"_type": type(body).__name__}
+    out = {}
+    for k in _RESP_KEEP:
+        if k in body:
+            out[k] = body[k]
+    data = body.get("data")
+    if isinstance(data, dict):
+        d = {}
+        for k in _RESP_KEEP:
+            if k in data:
+                d[k] = data[k]
+        d["_keys"] = sorted(data.keys())   # 只留字段名，不留值
+        out["data"] = d
+    out["_keys"] = sorted(body.keys())
+    return out
+
+
+def _resp_for_detail(body):
+    """按 WB_DUMP_RESP 决定 detail 里放完整响应还是白名单压缩版。"""
+    if os.environ.get("WB_DUMP_RESP") == "1":
+        return body
+    return _slim_resp(body)
 
 
 def _extract_balance(*bodies):
@@ -672,7 +720,7 @@ def run(check_only):
             # 1) 查询今日状态
             st_code, st_body = api_call(base, STATUS_PATH, token)
             result["detail"]["status_http"] = st_code
-            result["detail"]["status_resp"] = st_body
+            result["detail"]["status_resp"] = _resp_for_detail(st_body)
             # 从状态响应中提前提取积分余额（领取分支会用领取响应再覆盖一次）
             result["balance"] = _extract_balance(st_body)
             result["detail"]["balance"] = result["balance"]
@@ -706,7 +754,7 @@ def run(check_only):
             # 2) 领取签到
             ck_code, ck_body = api_call(base, CHECKIN_PATH, token)
             result["detail"]["checkin_http"] = ck_code
-            result["detail"]["checkin_resp"] = ck_body
+            result["detail"]["checkin_resp"] = _resp_for_detail(ck_body)
 
             if isinstance(ck_body, dict):
                 code = str(ck_body.get("code", ""))
